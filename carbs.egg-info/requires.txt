@@ -1,9 +1,0 @@
-attrs
-cattrs
-loguru
-numpy
-pyro-ppl
-scikit-learn
-seaborn
-torch
-wandb

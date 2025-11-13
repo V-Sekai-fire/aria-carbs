@@ -26,22 +26,14 @@ erl_crash.dump
 # Temporary files, for example, from tests.
 *.tmp
 
-# Python cache files
+# Python cache files (from pythonx/CARBS)
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
 
-# Python virtual environments
+# Python virtual environments (from pythonx)
 .venv/
 venv/
 ENV/
-
-# Python egg-info
-*.egg-info/
-dist/
-build/
-
-# Keep the original CARBS Python library for reference
-# but we'll use fire/carbs via git dependency in pythonx
