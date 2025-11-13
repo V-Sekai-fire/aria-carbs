@@ -1,0 +1,40 @@
+{
+  "test_name": "GP hyperparameter optimization",
+  "true_values": {
+    "length_scale": 2.0,
+    "noise_variance": 0.1,
+    "signal_variance": 1.5
+  },
+  "param_spaces": [
+    {
+      "name": "length_scale",
+      "space_type": "LogSpace",
+      "min": 0.5,
+      "max": 5.0,
+      "scale": 1.0,
+      "search_center": 2.0
+    },
+    {
+      "name": "noise_variance",
+      "space_type": "LogSpace",
+      "min": 0.05,
+      "max": 0.5,
+      "scale": 1.0,
+      "search_center": 0.2
+    },
+    {
+      "name": "signal_variance",
+      "space_type": "LogSpace",
+      "min": 0.5,
+      "max": 3.0,
+      "scale": 1.0,
+      "search_center": 1.5
+    }
+  ],
+  "expected_tolerance": {
+    "length_scale": 0.5,
+    "noise_variance": 0.8,
+    "signal_variance": 0.5
+  }
+}
+

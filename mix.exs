@@ -18,14 +18,16 @@ defmodule AriaCarbs.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger],
+      mod: {AriaCarbs.Application, []}
     ]
   end
 
   defp deps do
     [
-      {:pythonx, "~> 0.4.0", runtime: false},
+      {:pythonx, "~> 0.4.0"},
       {:jason, "~> 1.4"},
+      {:ecto_sqlite3, "~> 0.12.0"},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
