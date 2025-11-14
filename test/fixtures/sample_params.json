@@ -1,0 +1,8 @@
+{
+  "better_direction_sign": -1,
+  "is_wandb_logging_enabled": false,
+  "resample_frequency": 0,
+  "num_random_samples": 3,
+  "initial_search_radius": 0.3
+}
+

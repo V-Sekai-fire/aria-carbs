@@ -37,3 +37,21 @@ __pycache__/
 .venv/
 venv/
 ENV/
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+priv/*.db
+priv/*.db-shm
+priv/*.db-wal
+
+# Release artifacts
+_build/prod/rel/
+*.tar.gz
+
+# Ecto migration lock files
+priv/repo/migrations/.formatted.exs
+
+# CARBS checkpoint directory
+checkpoints/

@@ -13,6 +13,23 @@ defmodule AriaCarbs do
   require Logger
   alias Pythonx
 
+  # Agent to store CARBS Python instances across eval calls
+  @agent_name __MODULE__.CarbsStore
+
+  defp ensure_agent do
+    case Process.whereis(@agent_name) do
+      nil ->
+        case Agent.start_link(fn -> %{} end, name: @agent_name) do
+          {:ok, pid} -> pid
+          {:error, {:already_started, pid}} -> pid
+          error -> raise "Failed to start Agent: #{inspect(error)}"
+        end
+
+      pid ->
+        pid
+    end
+  end
+
   @doc """
   Check if CARBS is available via pythonx.
   """
@@ -61,13 +78,18 @@ defmodule AriaCarbs do
   end
 
   defp do_init(params, param_spaces) do
+    ensure_agent()
     params_json = Jason.encode!(params)
     param_spaces_json = Jason.encode!(param_spaces)
+
+    # Use globals to persist CARBS instance across eval calls
+    globals = %{"aria_carbs_instances" => %{}}
 
     code = """
     import sys
     import json
 
+    result = None
     try:
         from carbs.carbs import CARBS
         from carbs.utils import CARBSParams, Param, LinearSpace, LogSpace, LogitSpace
@@ -105,13 +127,20 @@ defmodule AriaCarbs do
             param_objects.append(Param(name=name, space=space, search_center=search_center))
 
         # Create CARBSParams
+        # Handle max_suggestion_cost - convert None to Python None explicitly
+        max_cost = params_dict.get('max_suggestion_cost')
+        if max_cost is None:
+            max_cost_val = None
+        else:
+            max_cost_val = float(max_cost)
+        
         carbs_params = CARBSParams(
             better_direction_sign=params_dict.get('better_direction_sign', -1),
             is_wandb_logging_enabled=params_dict.get('is_wandb_logging_enabled', False),
             resample_frequency=params_dict.get('resample_frequency', 5),
             num_random_samples=params_dict.get('num_random_samples', 4),
             initial_search_radius=params_dict.get('initial_search_radius', 0.3),
-            max_suggestion_cost=params_dict.get('max_suggestion_cost'),
+            max_suggestion_cost=max_cost_val,
             min_pareto_cost_fraction=params_dict.get('min_pareto_cost_fraction', 0.2),
             is_saved_on_every_observation=params_dict.get('is_saved_on_every_observation', True)
         )
@@ -119,31 +148,49 @@ defmodule AriaCarbs do
         # Initialize CARBS
         carbs = CARBS(carbs_params, param_objects)
 
+        # Store CARBS instance in globals dict for suggest/observe
+        aria_carbs_instances['default'] = carbs
+
         # Return success indicator
-        json.dumps({'status': 'ok', 'message': 'CARBS initialized successfully'})
+        result = json.dumps({'status': 'ok', 'message': 'CARBS initialized successfully'})
     except ImportError as e:
-        json.dumps({'status': 'error', 'message': f'Failed to import CARBS: {str(e)}'})
+        result = json.dumps({'status': 'error', 'message': f'Failed to import CARBS: {str(e)}'})
     except Exception as e:
-        json.dumps({'status': 'error', 'message': f'Failed to initialize CARBS: {str(e)}'})
+        result = json.dumps({'status': 'error', 'message': f'Failed to initialize CARBS: {str(e)}'})
+    
+    result
     """
 
-    case Pythonx.eval(code, %{}) do
-      {result, _globals} ->
-        case Pythonx.decode(result) do
-          json_str when is_binary(json_str) ->
-            case Jason.decode(json_str) do
-              {:ok, %{"status" => "ok"}} ->
-                {:ok, :carbs_initialized}
+    case Pythonx.eval(code, globals) do
+      {result, updated_globals} ->
+        case result do
+          nil ->
+            {:error, "Pythonx.eval returned nil - Python code may not have returned a value"}
 
-              {:ok, %{"status" => "error", "message" => msg}} ->
-                {:error, msg}
+          %Pythonx.Object{} = obj ->
+            case Pythonx.decode(obj) do
+              json_str when is_binary(json_str) ->
+                case Jason.decode(json_str) do
+                  {:ok, %{"status" => "ok"}} ->
+                    # Store the updated globals (which contain the CARBS instance) in our Agent
+                    Agent.update(@agent_name, fn state ->
+                      Map.put(state, "default", updated_globals)
+                    end)
+                    {:ok, :carbs_initialized}
+
+                  {:ok, %{"status" => "error", "message" => msg}} ->
+                    {:error, msg}
+
+                  _ ->
+                    {:error, "Unexpected response from CARBS initialization"}
+                end
 
               _ ->
-                {:error, "Unexpected response from CARBS initialization"}
+                {:error, "Failed to decode CARBS initialization result"}
             end
 
-          _ ->
-            {:error, "Failed to decode CARBS initialization result"}
+          other ->
+            {:error, "Unexpected Pythonx.eval result: #{inspect(other)}"}
         end
 
       error ->
@@ -171,44 +218,76 @@ defmodule AriaCarbs do
   end
 
   defp do_suggest do
-    code = """
-    import json
+    ensure_agent()
+    # Get stored globals from Agent
+    stored_globals = Agent.get(@agent_name, fn state -> Map.get(state, "default") end)
 
-    try:
-        # Get suggestion from CARBS
-        # Note: This assumes CARBS instance is stored in globals
-        # In a full implementation, we'd need to manage CARBS instances
-        suggestion_output = carbs.suggest()
-        suggestion = suggestion_output.suggestion
+    case stored_globals do
+      nil ->
+        {:error, "CARBS not initialized. Call init/2 first."}
 
-        json.dumps({'status': 'ok', 'suggestion': suggestion})
-    except NameError:
-        json.dumps({'status': 'error', 'message': 'CARBS not initialized. Call init/2 first.'})
-    except Exception as e:
-        json.dumps({'status': 'error', 'message': f'Failed to get suggestion: {str(e)}'})
-    """
+      globals ->
+        # Pass globals as-is to Python - Pythonx will handle conversion
+        code = """
+        import json
 
-    case Pythonx.eval(code, %{}) do
-      {result, _globals} ->
-        case Pythonx.decode(result) do
-          json_str when is_binary(json_str) ->
-            case Jason.decode(json_str) do
-              {:ok, %{"status" => "ok", "suggestion" => suggestion}} ->
-                {:ok, suggestion}
+        result = None
+        try:
+            # Get suggestion from CARBS instance stored in globals
+            g = globals()
+            if 'aria_carbs_instances' not in g:
+                result = json.dumps({'status': 'error', 'message': 'CARBS not initialized. Call init/2 first.'})
+            else:
+                aria_carbs_instances = g['aria_carbs_instances']
+                if 'default' not in aria_carbs_instances:
+                    result = json.dumps({'status': 'error', 'message': 'CARBS not initialized. Call init/2 first.'})
+                else:
+                    carbs = aria_carbs_instances['default']
+                    suggestion_output = carbs.suggest()
+                    suggestion = suggestion_output.suggestion
+                    result = json.dumps({'status': 'ok', 'suggestion': suggestion})
+        except Exception as e:
+            result = json.dumps({'status': 'error', 'message': f'Failed to get suggestion: {str(e)}'})
+        
+        result
+        """
 
-              {:ok, %{"status" => "error", "message" => msg}} ->
-                {:error, msg}
+        case Pythonx.eval(code, globals) do
+          {result, updated_globals} ->
+            # Update stored globals
+            Agent.update(@agent_name, fn state ->
+              Map.put(state, "default", updated_globals)
+            end)
+
+            case result do
+          nil ->
+            {:error, "Pythonx.eval returned nil - Python code may not have returned a value"}
+
+          %Pythonx.Object{} = obj ->
+            case Pythonx.decode(obj) do
+              json_str when is_binary(json_str) ->
+                case Jason.decode(json_str) do
+                  {:ok, %{"status" => "ok", "suggestion" => suggestion}} ->
+                    {:ok, suggestion}
+
+                  {:ok, %{"status" => "error", "message" => msg}} ->
+                    {:error, msg}
+
+                  _ ->
+                    {:error, "Unexpected response from CARBS suggest"}
+                end
 
               _ ->
-                {:error, "Unexpected response from CARBS suggest"}
+                {:error, "Failed to decode CARBS suggestion result"}
             end
 
-          _ ->
-            {:error, "Failed to decode CARBS suggestion result"}
-        end
+            other ->
+              {:error, "Unexpected Pythonx.eval result: #{inspect(other)}"}
+          end
 
-      error ->
-        {:error, "Failed to get CARBS suggestion: #{inspect(error)}"}
+        error ->
+          {:error, "Failed to get CARBS suggestion: #{inspect(error)}"}
+      end
     end
   rescue
     e -> {:error, Exception.message(e)}
@@ -237,57 +316,90 @@ defmodule AriaCarbs do
   end
 
   defp do_observe(input, output, cost, is_failure) do
+    ensure_agent()
     input_json = Jason.encode!(input)
+    # Get stored globals from Agent
+    stored_globals = Agent.get(@agent_name, fn state -> Map.get(state, "default") end)
 
-    code = """
+    case stored_globals do
+      nil ->
+        {:error, "CARBS not initialized. Call init/2 first."}
+
+      globals ->
+        # Pass globals as-is to Python - Pythonx will handle conversion
+        code = """
     import json
     from carbs.utils import ObservationInParam
 
+    result = None
     try:
-        input_dict = json.loads('#{String.replace(input_json, "'", "\\'")}')
-        output_val = #{output}
-        cost_val = #{cost}
-        is_failure_val = #{is_failure}
+        # Get CARBS instance from globals
+        # Try to access aria_carbs_instances directly (it's in the execution context)
+        try:
+            aria_carbs_instances = globals()['aria_carbs_instances']
+            carbs = aria_carbs_instances['default']
+        except (KeyError, NameError):
+            result = json.dumps({'status': 'error', 'message': 'CARBS not initialized. Call init/2 first.'})
+        else:
+            input_dict = json.loads('#{String.replace(input_json, "'", "\\'")}')
+            output_val = #{output}
+            cost_val = #{cost}
+            is_failure_val = #{if is_failure, do: "True", else: "False"}
 
-        # Create observation
-        observation = ObservationInParam(
-            input=input_dict,
-            output=output_val,
-            cost=cost_val,
-            is_failure=is_failure_val
-        )
+            # Create observation
+            observation = ObservationInParam(
+                input=input_dict,
+                output=output_val,
+                cost=cost_val,
+                is_failure=is_failure_val
+            )
 
-        # Observe the result
-        carbs.observe(observation)
+            # Observe the result
+            carbs.observe(observation)
 
-        json.dumps({'status': 'ok', 'message': 'Observation recorded'})
-    except NameError:
-        json.dumps({'status': 'error', 'message': 'CARBS not initialized. Call init/2 first.'})
+            result = json.dumps({'status': 'ok', 'message': 'Observation recorded'})
     except Exception as e:
-        json.dumps({'status': 'error', 'message': f'Failed to observe: {str(e)}'})
+        result = json.dumps({'status': 'error', 'message': f'Failed to observe: {str(e)}'})
+    
+    result
     """
 
-    case Pythonx.eval(code, %{}) do
-      {result, _globals} ->
-        case Pythonx.decode(result) do
-          json_str when is_binary(json_str) ->
-            case Jason.decode(json_str) do
-              {:ok, %{"status" => "ok"}} ->
-                {:ok, :observed}
+        case Pythonx.eval(code, globals) do
+          {result, updated_globals} ->
+            # Update stored globals
+            Agent.update(@agent_name, fn state ->
+              Map.put(state, "default", updated_globals)
+            end)
 
-              {:ok, %{"status" => "error", "message" => msg}} ->
-                {:error, msg}
+            case result do
+              nil ->
+                {:error, "Pythonx.eval returned nil - Python code may not have returned a value"}
+
+              %Pythonx.Object{} = obj ->
+                case Pythonx.decode(obj) do
+                  json_str when is_binary(json_str) ->
+                    case Jason.decode(json_str) do
+                      {:ok, %{"status" => "ok"}} ->
+                        {:ok, :observed}
+
+                  {:ok, %{"status" => "error", "message" => msg}} ->
+                    {:error, msg}
+
+                  _ ->
+                    {:error, "Unexpected response from CARBS observe"}
+                end
 
               _ ->
-                {:error, "Unexpected response from CARBS observe"}
+                {:error, "Failed to decode CARBS observe result"}
             end
 
-          _ ->
-            {:error, "Failed to decode CARBS observe result"}
-        end
+            other ->
+              {:error, "Unexpected Pythonx.eval result: #{inspect(other)}"}
+          end
 
-      error ->
-        {:error, "Failed to observe CARBS result: #{inspect(error)}"}
+        error ->
+          {:error, "Failed to observe CARBS result: #{inspect(error)}"}
+      end
     end
   rescue
     e -> {:error, Exception.message(e)}

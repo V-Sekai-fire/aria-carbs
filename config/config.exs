@@ -15,3 +15,12 @@ config :pythonx, :uv_init,
   ]
   """
 
+# Ecto configuration for SQLite database
+config :aria_carbs,
+  ecto_repos: [AriaCarbs.Repo]
+
+config :aria_carbs, AriaCarbs.Repo,
+  database: Path.expand("../priv/aria_carbs.db", __DIR__),
+  pool_size: 1,
+  show_sensitive_data_on_connection_error: true
+
