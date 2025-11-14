@@ -27,7 +27,7 @@ defmodule AriaCarbs.MixProject do
     [
       {:pythonx, "~> 0.4.0"},
       {:jason, "~> 1.4"},
-      {:ecto_sqlite3, "~> 0.12.0"},
+      {:ecto_sqlite3, "~> 0.22.0"},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
